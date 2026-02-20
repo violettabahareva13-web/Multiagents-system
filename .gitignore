@@ -1,6 +1,12 @@
 **/__pycache__/
+**/*.py[cod]
 **/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+!**/.env.template
 **/.venv/
+**/venv/
 **/.DS_Store
 
 **/.langgraph_api/
@@ -12,6 +18,9 @@
 **/out
 **/.turbo
 **/.cache
+**/dist
+**/coverage
+**/*.log
 **/.yarn/*
 **/!.yarn/patches
 **/!.yarn/plugins
