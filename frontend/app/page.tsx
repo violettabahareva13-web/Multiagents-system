@@ -8,9 +8,9 @@ import { toast } from "sonner";
 import {
   chat,
   connectDb,
+  disconnectDb,
   getApiBaseUrl,
   ping,
-  setApiBaseUrl,
   type ChatResponse,
   type InterruptPayload,
 } from "@/lib/api";
@@ -84,7 +84,11 @@ function loadProfiles(): { profiles: DbProfile[]; activeId: string | null } {
 
 function saveProfiles(list: DbProfile[], activeId?: string) {
   localStorage.setItem(PROFILES_KEY, JSON.stringify(list));
-  if (activeId) localStorage.setItem(ACTIVE_PROFILE_KEY, activeId);
+  if (activeId) {
+    localStorage.setItem(ACTIVE_PROFILE_KEY, activeId);
+  } else {
+    localStorage.removeItem(ACTIVE_PROFILE_KEY);
+  }
 }
 
 function loadHistory(profileId: string): HistoryItem[] {
@@ -118,18 +122,13 @@ function rotateSessionId(): string {
 }
 
 export default function Page() {
-  const LOCAL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
-  const STAGING = process.env.NEXT_PUBLIC_API_BASE_URL_STAGING;
-  const PROD = process.env.NEXT_PUBLIC_API_BASE_URL_PROD;
-
   const [question, setQuestion] = useState("Покажи 5 строк из любой таблицы");
   const [sessionId, setSessionId] = useState<string>("");
 
-  const [apiBaseUrl, setApiBaseUrlState] = useState<string>(LOCAL);
-  const [server, setServer] = useState<"Localhost" | "Staging" | "Prod">("Localhost");
+  const [apiBaseUrl, setApiBaseUrlState] = useState<string>(process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend");
 
   // auth + status
-  const [connState, setConnState] = useState<ConnState>("connecting");
+  const [connState, setConnState] = useState<ConnState>("disconnected");
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -378,18 +377,13 @@ export default function Page() {
   }, [rows, search, columns, columnFilters]);
 
   useEffect(() => {
-    // session init
-    setSessionId(getSessionId());
-
     // api url init
     const cur = getApiBaseUrl();
     setApiBaseUrlState(cur);
-    if (cur === LOCAL) setServer("Localhost");
-    else if (STAGING && cur === STAGING) setServer("Staging");
-    else if (PROD && cur === PROD) setServer("Prod");
+    setSessionId("");
 
     // db profiles init
-    const { profiles: loaded, activeId } = loadProfiles();
+    const { profiles: loaded } = loadProfiles();
     if (loaded.length === 0) {
       const first: DbProfile = {
         id: crypto.randomUUID(),
@@ -400,12 +394,12 @@ export default function Page() {
         user: "postgres",
         password: "",
       };
-      saveProfiles([first], first.id);
+      saveProfiles([first]);
       setProfiles([first]);
-      setActiveProfileId(first.id);
+      setActiveProfileId(null);
     } else {
       setProfiles(loaded);
-      setActiveProfileId(activeId && loaded.some((p) => p.id === activeId) ? activeId : loaded[0].id);
+      setActiveProfileId(null);
     }
 
     // backward-compat cleanup for old auth state
@@ -416,12 +410,24 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    if (!activeProfileId) return;
+    if (!activeProfileId) {
+      setHistoryItems([]);
+      return;
+    }
     setHistoryItems(loadHistory(activeProfileId));
   }, [activeProfileId]);
 
   // health/connection state machine
   useEffect(() => {
+    if (!activeProfileId) {
+      setConnState("disconnected");
+      pingFailStreakRef.current = 0;
+      refreshRef.current = async () => {
+        setConnState("disconnected");
+      };
+      return;
+    }
+
     let alive = true;
 
     const tick = async (silent = false) => {
@@ -454,21 +460,7 @@ export default function Page() {
       alive = false;
       window.clearInterval(id);
     };
-  }, [apiBaseUrl]);
-
-  function applyServer(name: "Localhost" | "Staging" | "Prod") {
-    const url = name === "Localhost" ? LOCAL : name === "Staging" ? STAGING : PROD;
-    if (!url) {
-      toast.error("URL не задан", {
-        description: `Добавь NEXT_PUBLIC_API_BASE_URL_${name.toUpperCase()} в .env.local`,
-      });
-      return;
-    }
-    setServer(name);
-    setApiBaseUrl(url);
-    setApiBaseUrlState(url);
-      toast.success("Backend переключён", { description: url });
-  }
+  }, [activeProfileId, apiBaseUrl]);
 
   function toggleHistoryCollapsed() {
     setHistoryCollapsed((prev) => {
@@ -514,6 +506,8 @@ export default function Page() {
       await connectDb(sid, p);
       toast.success("Подключено", { description: `${p.user}@${p.host}:${p.port}/${p.db}` });
     } catch (e: any) {
+      setSessionId("");
+      setConnState("disconnected");
       toast.error("Ошибка подключения", { description: e?.message ?? "Ошибка подключения" });
     } finally {
       refreshRef.current?.();
@@ -559,6 +553,8 @@ export default function Page() {
       toast.success("Подключено", { description: `${next.user}@${next.host}:${next.port}/${next.db}` });
       setConnOpen(false);
     } catch (e: any) {
+      setSessionId("");
+      setConnState("disconnected");
       toast.error("Ошибка подключения", { description: e?.message ?? "Ошибка подключения" });
     } finally {
       refreshRef.current?.();
@@ -589,6 +585,23 @@ export default function Page() {
     setUser(p.user);
     setPwd(p.password);
     setConnOpen(true);
+  }
+
+  async function logoutProfile() {
+    const activeName = activeProfile?.name ?? null;
+    try {
+      await disconnectDb();
+    } catch {
+      // Local logout should still proceed even if backend disconnect failed.
+    }
+    setActiveProfileId(null);
+    setSessionId("");
+    setConnState("disconnected");
+    saveProfiles(profiles);
+    clearPendingInterrupt();
+    setErr(null);
+    setOut(null);
+    toast.success("Вы вышли из профиля", { description: activeName ? `Профиль «${activeName}» отключён.` : "Подключение к БД закрыто." });
   }
 
   function resetConversationContext() {
@@ -667,8 +680,8 @@ export default function Page() {
       if (!base) return;
 
       if (connState !== "connected") {
-        setErr("Нет подключения к БД. Откройте меню БД и подключите профиль.");
-        toast.error("Нет подключения", { description: "Откройте меню БД и сохраните профиль для подключения." });
+        setErr("Нет подключения к БД. Выберите профиль в меню БД и подключитесь.");
+        toast.error("Нет подключения", { description: "Выберите профиль в меню БД и запустите подключение." });
         return;
       }
 
@@ -756,17 +769,16 @@ export default function Page() {
     }
   }
 
-  const dbLine = activeProfile
-    ? `${activeProfile.name} (${activeProfile.user}@${activeProfile.host}:${activeProfile.port}/${activeProfile.db})`
-    : "—";
-  const shortSessionId = sessionId ? sessionId.slice(0, 8) : "—";
+  const shortSessionId = connState === "connected" && sessionId ? sessionId.slice(0, 8) : "—";
+  const profileLabel = activeProfile?.name ?? "не выбран";
+  const dbUserLabel = connState === "connected" ? activeProfile?.user ?? "—" : "—";
 
   const statusPill =
     connState === "connecting"
       ? { dot: "bg-amber-300", text: "Подключение" }
     : connState === "connected"
       ? { dot: "bg-emerald-400", text: "Подключено" }
-      : { dot: "bg-rose-400", text: "Отключено" };
+      : { dot: "bg-rose-400", text: "Не подключено" };
 
   return (
     <main className="relative min-h-screen overflow-hidden text-white">
@@ -811,41 +823,38 @@ export default function Page() {
 
       <div className="relative mx-auto w-full max-w-[1920px] px-6 py-10">
         {/* Header */}
-        <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+        <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
           <div className="space-y-3">
-            <div className="flex items-center gap-4">
-              {/* LOGO */}
-              <Link href="/" className="inline-flex items-center" aria-label="Home">
-                <Image src="/brand/desi-logo.webp" alt="DESI" width={96} height={96} className="h-20 w-auto object-contain" />
+            <div className="flex items-center">
+               <Link href="/" className="inline-flex items-center" aria-label="Home">
+                <Image
+                  src={encodeURI("/brand/Привет.webp")}
+                  alt="Multiagents"
+                  width={1024}
+                  height={300}
+                  priority
+                  sizes="(max-width: 768px) 92vw, (max-width: 1280px) 680px, 780px"
+                  className="h-28 w-auto max-w-[92vw] object-contain md:h-36 md:max-w-[680px] lg:h-44 lg:max-w-[780px]"
+                />
               </Link>
-              <div className="font-brand text-5xl font-semibold tracking-tight text-white/90">Text2SQL</div>
             </div>
           </div>
 
           <div className="flex flex-col items-end gap-2">
             <div className="flex flex-wrap items-center justify-end gap-2">
-              <Link href="/db-schema">
+              {connState === "connected" ? (
+                <Link href="/db-schema">
+                  <Button variant="secondary" className="border-white/10 bg-white/5 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white/10">
+                    Структура БД
+                  </Button>
+                </Link>
+              ) : null}
+
+              <Link href="/authors">
                 <Button variant="secondary" className="border-white/10 bg-white/5 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white/10">
-                  Структура БД
+                  Авторы
                 </Button>
               </Link>
-
-              {/* Server */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="secondary"
-                    className="border-white/10 bg-white/5 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white/10"
-                  >
-                    Сервер: {server === "Localhost" ? "Локальный" : server === "Staging" ? "Стейдж" : "Прод"}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => applyServer("Localhost")}>Локальный</DropdownMenuItem>
-                  {STAGING ? <DropdownMenuItem onClick={() => applyServer("Staging")}>Стейдж</DropdownMenuItem> : null}
-                  {PROD ? <DropdownMenuItem onClick={() => applyServer("Prod")}>Прод</DropdownMenuItem> : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
 
               {/* DB */}
               <DropdownMenu>
@@ -854,7 +863,7 @@ export default function Page() {
                     variant="secondary"
                     className="border-white/10 bg-white/5 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white/10"
                   >
-                    БД: {activeProfile?.name ?? "—"}
+                    БД: {activeProfile?.name ?? "не выбрана"}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-[220px]">
@@ -869,19 +878,21 @@ export default function Page() {
                   <Separator className="my-1 bg-white/10" />
                   <DropdownMenuItem onClick={newProfile}>Новый профиль</DropdownMenuItem>
                   {activeProfile ? <DropdownMenuItem onClick={() => openEditProfile(activeProfile.id)}>Редактировать активный</DropdownMenuItem> : null}
+                  {activeProfile ? <DropdownMenuItem onClick={() => void logoutProfile()}>Выйти из профиля</DropdownMenuItem> : null}
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/75">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className={`h-2.5 w-2.5 rounded-full ${statusPill.dot}`} />
                 <span>{statusPill.text}</span>
                 <Separator orientation="vertical" className="mx-1 h-4 bg-white/15" />
-                <span>Пользователь БД: {activeProfile?.user ?? "—"}</span>
+                <span>Профиль: {profileLabel}</span>
+                <Separator orientation="vertical" className="mx-1 h-4 bg-white/15" />
+                <span>Пользователь БД: {dbUserLabel}</span>
                 <Separator orientation="vertical" className="mx-1 h-4 bg-white/15" />
                 <span>Сессия: {shortSessionId}</span>
               </div>
-              <div className="mt-1 text-white/60">{dbLine}</div>
             </div>
           </div>
         </div>

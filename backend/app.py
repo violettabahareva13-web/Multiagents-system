@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from langgraph.types import Command
 
 import database
+from config import CORS_ORIGINS
 from database import (
     init_database_pool,
     shutdown_database_pool,
@@ -129,12 +130,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title='SQL Agent', lifespan=lifespan)
 
+_default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=CORS_ORIGINS + _default_origins if CORS_ORIGINS else _default_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -51,23 +51,70 @@ export type InterruptPayload = {
 export type InterruptDecision = Record<string, unknown>;
 export type InterruptHandler = (interrupt: InterruptPayload) => InterruptDecision | Promise<InterruptDecision>;
 
-const API_BASE_URL_KEY = "t2sql_api_base_url_v1";
+const API_BASE_URL_KEY = "t2sql_api_base_url_v2";
+const LEGACY_API_BASE_URL_KEY = "t2sql_api_base_url_v1";
 const SESSION_ID_KEY = "t2sql_session_id";
 
-let apiBaseUrl =
-  (typeof window !== "undefined" && localStorage.getItem(API_BASE_URL_KEY)) ||
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  "http://127.0.0.1:8000";
+function isLocalHost(hostname: string) {
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+function normalizeApiBaseUrl(value?: string | null) {
+  let raw = String(value ?? "").trim();
+  if (!raw) raw = String(process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend").trim();
+
+  // Fix the common typo that broke production for many users.
+  raw = raw.replace(/\/beckend(\/|$)/gi, "/backend$1");
+
+  if (raw.startsWith("/")) {
+    const path = raw.replace(/\/$/, "");
+    return path || "/backend";
+  }
+
+  if (typeof window !== "undefined") {
+    const currentHost = window.location.hostname;
+    const currentIsLocal = isLocalHost(currentHost);
+
+    try {
+      const parsed = new URL(raw);
+      const parsedPath = parsed.pathname.replace(/\/$/, "") || "/backend";
+
+      if (!currentIsLocal) {
+        if (isLocalHost(parsed.hostname)) return "/backend";
+        if (parsed.hostname !== currentHost) return "/backend";
+      }
+
+      return `${parsed.origin}${parsedPath}`;
+    } catch {
+      if (!currentIsLocal) return "/backend";
+    }
+  }
+
+  const withNoTrailingSlash = raw.replace(/\/$/, "");
+  return withNoTrailingSlash || "/backend";
+}
+
+let apiBaseUrl = normalizeApiBaseUrl(
+  (typeof window !== "undefined" &&
+    (localStorage.getItem(API_BASE_URL_KEY) ?? localStorage.getItem(LEGACY_API_BASE_URL_KEY))) ||
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    "/backend"
+);
 
 export function setApiBaseUrl(url: string) {
-  apiBaseUrl = url.replace(/\/$/, "");
-  if (typeof window !== "undefined") localStorage.setItem(API_BASE_URL_KEY, apiBaseUrl);
+  apiBaseUrl = normalizeApiBaseUrl(url);
+  if (typeof window !== "undefined") {
+    localStorage.setItem(API_BASE_URL_KEY, apiBaseUrl);
+    localStorage.removeItem(LEGACY_API_BASE_URL_KEY);
+  }
 }
 
 export function getApiBaseUrl() {
   if (typeof window !== "undefined") {
-    const v = localStorage.getItem(API_BASE_URL_KEY);
-    if (v) apiBaseUrl = v.replace(/\/$/, "");
+    const v = localStorage.getItem(API_BASE_URL_KEY) ?? localStorage.getItem(LEGACY_API_BASE_URL_KEY);
+    apiBaseUrl = normalizeApiBaseUrl(v);
+    localStorage.setItem(API_BASE_URL_KEY, apiBaseUrl);
+    localStorage.removeItem(LEGACY_API_BASE_URL_KEY);
   }
   return apiBaseUrl;
 }

@@ -17,8 +17,6 @@ from visual import graph_vis, safe_exec, review_visualization
 import logging
 logger = logging.getLogger(__name__)
 
-graph = None
-
 critic_llm = ChatGroq(model="llama-3.1-8b-instant", 
                temperature=0, 
                api_key=GROQ_API_KEY,
@@ -83,8 +81,6 @@ def assistant(state: AgentState):
     last_msg = messages[-1] if messages else None
     critic_attempts = state.get("critic_attempts", 0)
 
-    # Если последний SQL выполнился успешно, но вернул 0 строк —
-    # сразу даем понятный ответ пользователю (без нового цикла SQL/критика).
     if isinstance(last_msg, ToolMessage) and getattr(last_msg, "name", "") == "run_sql":
         try:
             parsed = json.loads(last_msg.content)
@@ -93,8 +89,6 @@ def assistant(state: AgentState):
         except Exception:
             pass
 
-    # После лимита критика возвращаем человеку понятный итог,
-    # а не JSON из ToolMessage.
     if (
         critic_attempts >= 3
         and isinstance(last_msg, ToolMessage)
@@ -371,8 +365,7 @@ def after_tools_decision(state: AgentState) -> str:
         if all("clients" in t for t in last_two_texts):
             logger.warning("⚠️ Критик зациклился на таблице 'clients' → assistant")
             return "assistant"
-        # Считаем только текущую "серию" после последнего сообщения пользователя,
-        # чтобы прошлые запросы в этой же thread_id не ломали роутинг.
+
         zero_rows_in_current_request = 0
         for m in reversed(state["messages"]):
             if isinstance(m, HumanMessage):
@@ -393,8 +386,7 @@ def after_tools_decision(state: AgentState) -> str:
     logger.info(f"📊 has_error={has_error}, has_no_data={has_no_data}, "
                 f"critic_attempts={critic_attempts}/{max_critic_attempts}")
 
-    # Критик нужен для SQL-ошибок. Пустой результат (0 строк) сам по себе не ошибка,
-    # особенно на новой/пустой БД.
+
     if has_error and critic_attempts < max_critic_attempts:
         logger.info(f"❌ SQL неуспешен → критик (будет попытка {critic_attempts + 1})")
         return "critic"
@@ -426,8 +418,6 @@ def after_tools_decision(state: AgentState) -> str:
     return END
 
 def build_graph():
-    global graph
-    
     memory = MemorySaver()
     builder = StateGraph(AgentState)
     builder.add_node('checked_cache', checked_cache)
@@ -454,8 +444,6 @@ def build_graph():
         should_continue,
         {
             "tools": "tools",
-            "graph_vis": "graph_vis",
-            "assistant": "assistant",
             END: END,
         }
     )
@@ -475,5 +463,6 @@ def build_graph():
     builder.add_edge('review_visualization', 'safe_exec')
     builder.add_edge('safe_exec', END)
     
-    graph = builder.compile(checkpointer=memory)
-    return graph
+    return builder.compile(checkpointer=memory)
+
+graph = build_graph

@@ -33,3 +33,6 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or os.getenv("POSTGRES_PASSWORD")
 DB_CONNECT_TIMEOUT = _get_int("DB_CONNECT_TIMEOUT", 10)
 DB_POOL_MIN_CONN = _get_int("DB_POOL_MIN_CONN", 1)
 DB_POOL_MAX_CONN = _get_int("DB_POOL_MAX_CONN", 10)
+
+_raw = os.getenv("CORS_ORIGINS", "").strip()
+CORS_ORIGINS = [s.strip() for s in _raw.split(",") if s.strip()] or None
